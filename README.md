@@ -10,8 +10,8 @@
 
 ## Запуск бота
 Для работы бота необходимо создать файл в проекте config.py и указать переменные окружения:
->BOT_TOKEN = '<токен Telegram-бота>'
->DB_NAME = 'habit_tracker.db' # или любое другое имя файла БД
+</br>BOT_TOKEN = '<токен Telegram-бота>'
+</br>DB_NAME = 'habit_tracker.db' # или любое другое имя файла БД
 
 ### License
 This project is licensed under the [Apache-2.0 license](http://www.apache.org/licenses).
