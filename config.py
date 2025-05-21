@@ -1,0 +1,2 @@
+BOT_TOKEN = "7001954150:AAGb10-bc9u4RqXRTKBtj9vENsSQkyXNBzk"
+DB_NAME = 'habit_tracker.db'
