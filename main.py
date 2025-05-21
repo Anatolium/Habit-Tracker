@@ -49,7 +49,7 @@ def error_handler(func):
             bot.stop_polling()
             time.sleep(5)  # Дайте немного времени перед перезапуском
             # bot.polling(none_stop=True)
-            # TODO вызвать стартовое меню handle_start()
+            # вызвать стартовое меню handle_start()
 
     return wrapper
 
