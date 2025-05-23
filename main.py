@@ -8,14 +8,29 @@ from report import report
 import time
 from datetime import datetime
 import json
+import logging
 
 init_db()
 
-init_habit("Чтение", "Читать книгу 30 минут в день")
-init_habit("Спорт", "Заниматься спортом 3 раза в неделю")
-init_habit("Медитация", "Практиковать медитацию 10 минут ежедневно")
-init_habit("Вода", "Пить 2 литра воды в день")
-init_habit("Ранний подъем", "Вставать в 7 утра ежедневно")
+# Настройка логирования
+logging.basicConfig(
+    filename='bot.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+
+# Проверка содержимого таблицы habit
+def check_habits():
+    conn = sqlite3.connect('habit_tracker.db')  # Изменено
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, description FROM habit")
+    habits = cur.fetchall()
+    print("Habits in DB after init:", habits)
+    conn.close()
+
+
+check_habits()  # Вызов для отладки
 
 print("bot is being started", datetime.now())
 
@@ -39,17 +54,30 @@ buttons_dict = {
     'chart': 'График'
 }
 
+# Настройка логирования
+logging.basicConfig(
+    filename='bot.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 
 def error_handler(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            print(f"Error in {func.__name__}: {e}")
-            bot.stop_polling()
-            time.sleep(5)  # Дайте немного времени перед перезапуском
-            # bot.polling(none_stop=True)
-            # вызвать стартовое меню handle_start()
+            logging.error(f"Error in {func.__name__}: {e}", exc_info=True)
+            try:
+                if args and hasattr(args[0], 'message'):
+                    bot.send_message(
+                        args[0].message.chat.id,
+                        "Произошла ошибка. Попробуйте снова или свяжитесь с поддержкой.",
+                        reply_markup=create_inline_keyboard(['menu'])
+                    )
+            except Exception as send_error:
+                logging.error(f"Failed to send error message: {send_error}", exc_info=True)
+            return None
 
     return wrapper
 
@@ -66,10 +94,13 @@ def create_inline_keyboard(button_keys):
 
 def send_custom_message_to_all_active_users():
     active_users = get_all_active_users()
-    menu_keyboard = create_inline_keyboard(['status', 'edit_habit', 'mark_habit'])
+    if not active_users:
+        logging.info("No active users found for sending custom messages")
+        return
 
+    menu_keyboard = create_inline_keyboard(['habits', 'status', 'add'])  # Стартовое меню
     for user_id_tuple in active_users:
-        user_id = user_id_tuple[0]  # предполагается, что user_id это первый элемент кортежа
+        user_id = user_id_tuple[0]
         try:
             habits_info = habit_status(user_id)
             if not habits_info:
@@ -79,18 +110,20 @@ def send_custom_message_to_all_active_users():
                     f"{habit} - {info['description']} {info['frequency']}x в {info['frequency']} {pluralize_count(info['count'])}"
                     for habit, info in habits_info.items()
                 ])
-
             bot.send_message(user_id, message_text, reply_markup=menu_keyboard)
+            logging.info(f"Sent custom message to user {user_id}: {message_text[:50]}...")
         except Exception as e:
-            print(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+            logging.error(f"Failed to send message to user {user_id}: {e}", exc_info=True)
 
 
 # Обработчик для возврата в главное меню
 @bot.callback_query_handler(func=lambda call: call.data == 'menu')
 @error_handler
 def handle_menu(call):
-    keyboard = create_inline_keyboard(['status', 'edit_habit', 'mark_habit'])
-    bot.send_message(call.message.chat.id, 'На главную', reply_markup=keyboard)
+    logging.info(f"User {call.from_user.id} returned to main menu")
+    clear_user_session(call.from_user.id)
+    keyboard = create_inline_keyboard(['habits', 'status', 'add'])
+    bot.send_message(call.message.chat.id, "Выберите действие:", reply_markup=keyboard)
 
 
 # Обработчик для вывода статуса текущих привычек
@@ -215,7 +248,7 @@ def select_habit_for_editing(call):
     data = json.dumps({'habit_id': habit_id})
     save_user_session(call.from_user.id, state, data)
     keyboard = types.InlineKeyboardMarkup()
-    periods = ["ежедневно", "еженедельно", "ежемесячно"]
+    periods = ["Ежедневно", "Еженедельно", "Ежемесячно"]
     for period in periods:
         keyboard.add(types.InlineKeyboardButton(text=period, callback_data=f'edit_period_{period}_{habit_id}'))
     keyboard.add(types.InlineKeyboardButton(text='Отмена', callback_data='menu'))
@@ -238,69 +271,159 @@ def select_new_period(call):
     bot.send_message(call.message.chat.id, msg, reply_markup=types.ForceReply(selective=True))
 
 
-# Обработчик для ввода нового количества выполнений
 @bot.message_handler(func=lambda message: message.reply_to_message and message.reply_to_message.text.startswith(
-    "Введите новое количество выполнений"))
+    "Введите количество выполнений"))
 @error_handler
 def handle_repetition_count_input(message):
     raw_session_data = get_user_session(message.chat.id)
+    logging.info(f"Received input for user {message.chat.id}: {message.text}")
+    print(f"Handling repetition count input for user {message.chat.id}")
     if raw_session_data:
         try:
             session_data = json.loads(raw_session_data)
+            logging.info(f"Session data: {session_data}")
             repetition_count = int(message.text)
             if 1 <= repetition_count <= 30:
-                # Вызываем функцию редактирования с полученными данными
-                user_id = message.chat.id
-                habit_id = session_data['habit_id']
-                frequency_name = session_data['frequency_name']
-                response = edit_habit(user_id, habit_id, frequency_name, repetition_count)
-                bot.send_message(message.chat.id, response, reply_markup=create_inline_keyboard(['menu']))
+                response = assign_habit(message.chat.id, session_data['habit_id'], session_data['frequency_name'],
+                                        repetition_count)
+                logging.info(f"Assign habit response: {response}")
+                print(f"Sending response: {response}")
                 clear_user_session(message.chat.id)
+                keyboard = create_inline_keyboard(['menu'])
+                bot.send_message(message.chat.id, response, reply_markup=keyboard)
             else:
-                bot.send_message(message.chat.id, "Введите число от 1 до 30.")
+                bot.send_message(message.chat.id, "Введите число от 1 до 30.",
+                                 reply_markup=types.ForceReply(selective=True))
         except ValueError:
-            bot.send_message(message.chat.id, "Пожалуйста, введите корректное число.")
+            bot.send_message(message.chat.id, "Пожалуйста, введите число (например, 1, 2, 3).",
+                             reply_markup=types.ForceReply(selective=True))
+        except Exception as e:
+            logging.error(f"Error in handle_repetition_count_input: {e}", exc_info=True)
+            bot.send_message(message.chat.id, "Произошла ошибка. Попробуйте снова.",
+                             reply_markup=create_inline_keyboard(['menu']))
     else:
-        bot.send_message(message.chat.id, "Сессия не найдена или истекло время ожидания. Пожалуйста, начните заново.",
+        bot.send_message(message.chat.id, "Сессия истекла. Начните заново, выбрав 'Добавить'.",
                          reply_markup=create_inline_keyboard(['menu']))
 
 
-# Добавление новой привычки
-# Обработчик для начала процесса добавления новой привычки
 @bot.callback_query_handler(func=lambda call: call.data == 'new_habit')
 @error_handler
 def handle_new_habit(call):
-    # Получаем список привычек для пользователя
-    habits_list_str = list_habits()  # Функция возвращает строку с описаниями привычек
-    # Предположим, что формат строки: "ID. Название: Описание"
-    habits = [line.split('. ', 1) for line in habits_list_str.strip().split('\n') if line]
-    keyboard = types.InlineKeyboardMarkup()
-    for habit_info in habits:
-        if len(habit_info) == 2:
-            habit_id_with_dot, habit_desc = habit_info
-            habit_id = habit_id_with_dot.split('.')[0]  # Удаление точки после ID
-            habit_name = habit_desc.split(': ')[0]  # Извлекаем название привычки
-            button_text = habit_name  # Используем название для подписи кнопки
-            keyboard.add(types.InlineKeyboardButton(text=button_text, callback_data=f'add_select_{habit_id.strip()}'))
-        else:
-            continue  # Пропустить записи, которые не соответствуют ожидаемому формату
-    bot.send_message(call.message.chat.id, "Выберите привычку для добавления:", reply_markup=keyboard)
-
-
-# Обработчик для выбора привычки и перехода к выбору периодичности
-@bot.callback_query_handler(func=lambda call: call.data.startswith('add_select_'))
-@error_handler
-def select_habit_for_addition(call):
-    habit_id = call.data.split('_')[2]
-    state = 'selecting_habit'  # Устанавливаем состояние сессии
-    data = json.dumps({'habit_id': habit_id})  # Конвертируем данные в строку JSON
+    state = 'entering_habit_name'
+    data = json.dumps({})
     save_user_session(call.from_user.id, state, data)
-    keyboard = types.InlineKeyboardMarkup()
-    periods = ["ежедневно", "еженедельно", "ежемесячно"]
-    for period in periods:
-        keyboard.add(types.InlineKeyboardButton(text=period, callback_data=f'add_period_{period}_{habit_id}'))
-    keyboard.add(types.InlineKeyboardButton(text='Отмена', callback_data='menu'))
-    bot.send_message(call.message.chat.id, "Выберите периодичность привычки:", reply_markup=keyboard)
+    bot.send_message(call.message.chat.id, "Введите название новой привычки:",
+                     reply_markup=types.ForceReply(selective=True))
+
+
+@bot.message_handler(func=lambda
+        message: message.reply_to_message and message.reply_to_message.text == "Введите название новой привычки:")
+@error_handler
+def handle_habit_name_input(message):
+    habit_name = message.text.strip()
+    if habit_name.lower() == "отмена":
+        clear_user_session(message.chat.id)
+        bot.send_message(message.chat.id, "Добавление привычки отменено.",
+                         reply_markup=create_inline_keyboard(['menu']))
+        return
+    if not habit_name:
+        bot.send_message(message.chat.id, "Название не может быть пустым. Попробуйте снова или введите 'отмена':",
+                         reply_markup=types.ForceReply(selective=True))
+        return
+    if len(habit_name) > 50:
+        bot.send_message(message.chat.id,
+                         "Название слишком длинное (максимум 50 символов). Попробуйте снова или введите 'отмена':",
+                         reply_markup=types.ForceReply(selective=True))
+        return
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM habit WHERE name = ?", (habit_name,))
+    if cur.fetchone():
+        conn.close()
+        bot.send_message(message.chat.id,
+                         f"Привычка с названием '{habit_name}' уже существует. Введите другое название или введите 'отмена':",
+                         reply_markup=types.ForceReply(selective=True))
+        return
+    conn.close()
+    state = 'entering_habit_description'
+    data = json.dumps({'habit_name': habit_name})
+    update_user_session(message.chat.id, state, data)
+    bot.send_message(message.chat.id, "Введите описание привычки (или 'отмена'):",
+                     reply_markup=types.ForceReply(selective=True))
+
+
+@bot.message_handler(
+    func=lambda message: message.reply_to_message and "Введите описание привычки" in message.reply_to_message.text)
+@error_handler
+def handle_habit_description_input(message):
+    logging.info(f"Entering handle_habit_description_input for user {message.chat.id}")
+    print(f"Processing description input for user {message.chat.id}")
+    habit_description = message.text.strip()
+    logging.info(f"User {message.chat.id} entered description: {habit_description}")
+    print(f"Description: {habit_description}")
+    if habit_description.lower() == "отмена":
+        logging.info(f"User {message.chat.id} cancelled habit creation")
+        clear_user_session(message.chat.id)
+        bot.send_message(message.chat.id, "Добавление привычки отменено.",
+                         reply_markup=create_inline_keyboard(['menu']))
+        return
+    logging.info(f"Fetching session for user {message.chat.id}")
+    raw_session_data = get_user_session(message.chat.id)
+    logging.info(f"Session data: {raw_session_data}")
+    print(f"Session data: {raw_session_data}")
+    if raw_session_data:
+        try:
+            logging.info(f"Parsing session data")
+            session_data = json.loads(raw_session_data)
+            habit_name = session_data['habit_name']
+            logging.info(f"Extracted habit name: {habit_name}")
+            print(f"Habit name: {habit_name}")
+            if len(habit_description) > 200:
+                logging.info(f"Description too long for user {message.chat.id}")
+                bot.send_message(message.chat.id,
+                                 "Описание слишком длинное (максимум 200 символов). Попробуйте снова или введите 'отмена':",
+                                 reply_markup=types.ForceReply(selective=True))
+                return
+            logging.info(f"Connecting to database")
+            print("Connecting to database")
+            conn = sqlite3.connect(DB_NAME)
+            cur = conn.cursor()
+            logging.info(f"Executing INSERT for habit: name={habit_name}, description={habit_description}")
+            print(f"Executing INSERT: name={habit_name}, description={habit_description}")
+            cur.execute("INSERT INTO habit (name, description) VALUES (?, ?)", (habit_name, habit_description))
+            habit_id = cur.lastrowid
+            logging.info(f"Inserted habit with id={habit_id}")
+            print(f"Inserted habit with id={habit_id}")
+            conn.commit()
+            conn.close()
+            logging.info(f"Updating session to selecting_habit for user {message.chat.id}")
+            state = 'selecting_habit'
+            data = json.dumps({'habit_id': habit_id})
+            update_user_session(message.chat.id, state, data)
+            keyboard = types.InlineKeyboardMarkup()
+            periods = ["Ежедневно", "Еженедельно", "Ежемесячно"]
+            for period in periods:
+                keyboard.add(types.InlineKeyboardButton(text=period, callback_data=f'add_period_{period}_{habit_id}'))
+            keyboard.add(types.InlineKeyboardButton(text='Отмена', callback_data='menu'))
+            logging.info(f"Sending period selection message to user {message.chat.id}")
+            print("Sending period selection message")
+            bot.send_message(message.chat.id, "Выберите периодичность привычки:", reply_markup=keyboard)
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error for user {message.chat.id}: {e}", exc_info=True)
+            bot.send_message(message.chat.id, "Ошибка в данных сессии. Начните заново, выбрав 'Добавить'.",
+                             reply_markup=create_inline_keyboard(['menu']))
+        except sqlite3.Error as e:
+            logging.error(f"Database error for user {message.chat.id}: {e}", exc_info=True)
+            bot.send_message(message.chat.id, "Ошибка при сохранении привычки. Попробуйте снова.",
+                             reply_markup=create_inline_keyboard(['menu']))
+        except Exception as e:
+            logging.error(f"Unexpected error for user {message.chat.id}: {e}", exc_info=True)
+            bot.send_message(message.chat.id, "Произошла ошибка. Попробуйте снова.",
+                             reply_markup=create_inline_keyboard(['menu']))
+    else:
+        logging.warning(f"No session found for user {message.chat.id}")
+        bot.send_message(message.chat.id, "Сессия истекла. Начните заново, выбрав 'Добавить'.",
+                         reply_markup=create_inline_keyboard(['menu']))
 
 
 # Обработчик для выбора периодичности и перехода к вводу количества выполнений
@@ -312,37 +435,46 @@ def select_period(call):
         bot.send_message(call.message.chat.id, "Произошла ошибка в данных. Пожалуйста, попробуйте ещё раз.")
         return
     period = parts[2]
-    habit_id = '_'.join(parts[3:])  # Объединение оставшихся частей для сохранения целостности habit_id
-    state = 'selecting_period'  # или другое актуальное состояние
+    habit_id = parts[3]  # Изменено: берем только parts[3]
+    state = 'selecting_period'
     new_data = json.dumps({'frequency_name': period, 'habit_id': habit_id})
-    # Обновляем сессию пользователя
+    print(f"Updating session for user {call.from_user.id}: state={state}, data={new_data}")
     update_user_session(call.from_user.id, state, new_data)
-    # Запрашиваем количество выполнений
     msg = "Введите количество выполнений для привычки (от 1 до 30):"
     bot.send_message(call.message.chat.id, msg, reply_markup=types.ForceReply(selective=True))
 
 
-# Обработчик для текстового ввода количества выполнений
 @bot.message_handler(func=lambda message: message.reply_to_message and message.reply_to_message.text.startswith(
     "Введите количество выполнений"))
 @error_handler
 def handle_repetition_count_input(message):
     raw_session_data = get_user_session(message.chat.id)
+    logging.info(f"Received input for user {message.chat.id}: {message.text}")
     if raw_session_data:
         try:
-            session_data = json.loads(raw_session_data)  # Десериализация строки JSON в словарь
+            session_data = json.loads(raw_session_data)
+            logging.info(f"Session data: {session_data}")
             repetition_count = int(message.text)
             if 1 <= repetition_count <= 30:
                 response = assign_habit(message.chat.id, session_data['habit_id'], session_data['frequency_name'],
                                         repetition_count)
-                bot.send_message(message.chat.id, response, reply_markup=create_inline_keyboard(['menu']))
-                clear_user_session(message.chat.id)
+                logging.info(f"Assign habit response: {response}")
+                clear_user_session(message.chat.id)  # Сбрасываем сессию
+                keyboard = create_inline_keyboard(['menu'])  # Только кнопка "На главная"
+                bot.send_message(message.chat.id, response, reply_markup=keyboard)
             else:
-                bot.send_message(message.chat.id, "Введите число от 1 до 30.")
+                bot.send_message(message.chat.id, "Введите число от 1 до 30.",
+                                 reply_markup=types.ForceReply(selective=True))
         except ValueError:
-            bot.send_message(message.chat.id, "Пожалуйста, введите корректное число.")
+            bot.send_message(message.chat.id, "Пожалуйста, введите число (например, 1, 2, 3).",
+                             reply_markup=types.ForceReply(selective=True))
+        except Exception as e:
+            logging.error(f"Error in handle_repetition_count_input: {e}", exc_info=True)
+            bot.send_message(message.chat.id, "Произошла ошибка. Попробуйте снова.",
+                             reply_markup=create_inline_keyboard(['menu']))
     else:
-        bot.send_message(message.chat.id, "Сессия не найдена или истекло время ожидания. Пожалуйста, начните заново.")
+        bot.send_message(message.chat.id, "Сессия истекла. Начните заново, выбрав 'Добавить'.",
+                         reply_markup=create_inline_keyboard(['menu']))
 
 
 # Удаление привычки
@@ -438,7 +570,7 @@ def handle_habits(call):
     keyboard = create_inline_keyboard(['new_habit', 'edit_habit', 'del_habit', 'menu'])
     if not respond_message.strip():
         bot.send_message(call.message.chat.id,
-                         "Список привычек пуст. Свяжитесь с администратором для добавления привычек.",
+                         "Список привычек пуст. Нажмите 'Добавить', чтобы создать новую привычку.",
                          reply_markup=keyboard)
     else:
         bot.send_message(call.message.chat.id, respond_message, reply_markup=keyboard)
@@ -460,16 +592,22 @@ def handle_chart(call):
 def send_selected_chart(call):
     period = 'week' if 'week' in call.data else 'month'
     file_path = get_file_path(call.message.chat.id, period)
-    if file_path is None:
-        bot.send_message(call.message.chat.id, "Нет данных для отображения графика.")
-    else:
-        keyboard = types.InlineKeyboardMarkup()
-        back_button = types.InlineKeyboardButton(text='Назад', callback_data='menu')
-        keyboard.add(back_button)
+    keyboard = types.InlineKeyboardMarkup()
+    back_button = types.InlineKeyboardButton(text='Назад', callback_data='menu')
+    keyboard.add(back_button)
 
-        with open(file_path, 'rb') as photo:
-            bot.send_photo(call.message.chat.id, photo, reply_markup=keyboard)
-        delete_file(file_path)  # Удаление файла после отправки
+    if file_path is None:
+        bot.send_message(call.message.chat.id, "Нет данных для отображения графика за выбранный период.",
+                         reply_markup=keyboard)
+    else:
+        try:
+            with open(file_path, 'rb') as photo:
+                bot.send_photo(call.message.chat.id, photo, reply_markup=keyboard)
+            delete_file(file_path)  # Удаление файла после отправки
+        except FileNotFoundError:
+            logging.error(f"File not found: {file_path}", exc_info=True)
+            bot.send_message(call.message.chat.id, "Ошибка при отправке графика. Попробуйте снова.",
+                             reply_markup=keyboard)
 
     bot.answer_callback_query(call.id)
 

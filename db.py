@@ -31,7 +31,7 @@ def init_db():
             user_id INTEGER,
             habit_id INTEGER,
             active BOOLEAN NOT NULL DEFAULT 1,
-            frequency_name TEXT CHECK(frequency_name IN ('ежедневно', 'еженедельно', 'ежемесячно')),
+            frequency_name TEXT CHECK(frequency_name IN ('Ежедневно', 'Еженедельно', 'Ежемесячно')),
             frequency_count INTEGER,
 
             FOREIGN KEY (user_id) REFERENCES user(id),
